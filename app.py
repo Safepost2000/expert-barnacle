@@ -88,7 +88,7 @@ if 'processing_complete' not in st.session_state:
     st.session_state.processing_complete = False
 
 # Initialize Gemini models
-def initialize_model(model_name="gemini-2.5-pro-preview-03-25):
+def initialize_model(model_name="gemini-2.0-flash):
     """Initialize and return the specified Gemini model."""
     model = genai.GenerativeModel(model_name)
     return model
@@ -101,7 +101,7 @@ def initialize_text_model(model_name="gemini-2.0-flash"):
 # AGENT 1: Invoice Reader
 class InvoiceReaderAgent:
     def __init__(self):
-        self.model = initialize_model("gemini-2.5-pro-preview-03-25")
+        self.model = initialize_model("gemini-2.0-flash")
         self.name = "Invoice Reader"
     
     def extract_data(self, image_bytes, image_type):
