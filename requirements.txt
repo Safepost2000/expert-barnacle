@@ -3,4 +3,4 @@ python-telegram-bot
 crewai 
 google-generativeai 
 python-dotenv
-pysqlite3
+pysqlite3-binary
