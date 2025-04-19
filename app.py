@@ -1,3 +1,20 @@
+#!/usr/bin/python3
+import sqlite3
+
+def ConnectToDB(sdb):
+    return sqlite3.connect(sdb)
+
+print(sqlite3.sqlite_version)
+print(sqlite3.__path__)
+
+DB = ":memory:"
+con = ConnectToDB(DB)
+cur = con.cursor()
+cur.execute("SELECT sqlite_version(),sqlite_source_id();")
+for row in cur:
+     print(row[0] + '\r\n' + row[1])
+
+con.close()
 import os
 import asyncio
 import logging
