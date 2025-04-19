@@ -3,613 +3,506 @@ import sys
 sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 
 import os
-import asyncio
-import logging
-import threading
-from typing import Dict, List, Optional, Tuple, Union, Any, Callable
-from dotenv import load_dotenv
+import io
+import re
 import json
-
-# Telegram Bot Library
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
-)
-
-# CrewAI
-from crewai import Agent, Task, Crew, Process
-from crewai.tools import BaseTool
-
-# Gemini API
+import base64
+import pandas as pd
+import streamlit as st
 import google.generativeai as genai
+from PIL import Image
+from dotenv import load_dotenv
+import tempfile
+import openpyxl
 
-# Configure logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# Load environment variables
+# Load environment variables and configure API key
 load_dotenv()
-
-# Get API keys from environment variables
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-# Configure Gemini API
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Available Gemini models
-DEFAULT_MODEL = "gemini-pro"
+# Set page configuration
+st.set_page_config(
+    page_title="Automated Invoice Processing",
+    page_icon="📊",
+    layout="wide"
+)
 
-# Custom class for wrapping Gemini with LLM interface compatible with CrewAI
-class GeminiLLM:
-    def __init__(self, model_name: str = DEFAULT_MODEL):
-        self.model_name = model_name
-        self.model = genai.GenerativeModel(name=model_name)
-        self.supports_functions = True
-        self.supports_stop_words = False
+# Custom CSS for better appearance
+st.markdown("""
+<style>
+    .main-title {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #1E88E5;
+        margin-bottom: 1rem;
+    }
+    .agent-title {
+        font-size: 1.5rem;
+        font-weight: bold;
+        color: #0D47A1;
+        margin-top: 1rem;
+        margin-bottom: 0.5rem;
+        padding: 0.5rem;
+        border-radius: 5px;
+    }
+    .agent-box {
+        background-color: #f0f8ff;
+        padding: 1rem;
+        border-radius: 10px;
+        margin-bottom: 1rem;
+    }
+    .status {
+        font-weight: bold;
+    }
+    .success {
+        color: #4CAF50;
+    }
+    .error {
+        color: #F44336;
+    }
+    .info {
+        color: #2196F3;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Header
+st.markdown("<div class='main-title'>Automated Invoice Processing System</div>", unsafe_allow_html=True)
+st.markdown("""
+This application uses three AI agents to process invoice documents:
+1. **Invoice Reader**: Extracts data from invoice images/PDFs
+2. **Excel Feeder**: Maps and enters data into Excel spreadsheets
+3. **Data Validator**: Verifies data accuracy and reports any issues
+""")
+
+# Initialize session state variables if they don't exist
+if 'extracted_data' not in st.session_state:
+    st.session_state.extracted_data = None
+if 'excel_data' not in st.session_state:
+    st.session_state.excel_data = None
+if 'validation_result' not in st.session_state:
+    st.session_state.validation_result = None
+if 'incidents' not in st.session_state:
+    st.session_state.incidents = []
+if 'processing_complete' not in st.session_state:
+    st.session_state.processing_complete = False
+
+# Initialize Gemini models
+def initialize_model(model_name="gemini-pro-vision"):
+    """Initialize and return the specified Gemini model."""
+    model = genai.GenerativeModel(model_name)
+    return model
+
+def initialize_text_model(model_name="gemini-pro"):
+    """Initialize and return the text-only Gemini model."""
+    model = genai.GenerativeModel(model_name)
+    return model
+
+# AGENT 1: Invoice Reader
+class InvoiceReaderAgent:
+    def __init__(self):
+        self.model = initialize_model("gemini-pro-vision")
+        self.name = "Invoice Reader"
     
-    def __call__(self, prompt: str, **kwargs):
+    def extract_data(self, image_bytes, image_type):
+        """Extract invoice information from the uploaded document."""
+        system_prompt = """
+        You are an expert invoice data extraction agent. 
+        Analyze the provided invoice image and extract the following information in JSON format:
+        1. Invoice Number
+        2. Date
+        3. Vendor Name
+        4. Line Items (as an array of objects with description, quantity, unit_price, and total)
+        5. Subtotal
+        6. Tax
+        7. Total Amount
+        
+        Return ONLY a valid JSON object with these fields. If you cannot find a particular field, use null as its value.
+        The JSON format should be:
+        {
+            "invoice_number": "value",
+            "date": "value",
+            "vendor_name": "value",
+            "line_items": [
+                {
+                    "description": "value",
+                    "quantity": number,
+                    "unit_price": number,
+                    "total": number
+                }
+            ],
+            "subtotal": number,
+            "tax": number,
+            "total": number
+        }
+        """
+        
+        image_info = [
+            {
+                "mime_type": image_type,
+                "data": image_bytes
+            }
+        ]
+        
         try:
-            response = self.model.generate_content(prompt)
-            return response.text
+            response = self.model.generate_content([system_prompt, image_info[0]])
+            
+            # Extract only the JSON object from the response
+            response_text = response.text
+            json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # If no code block, try to find JSON directly
+                json_pattern = r'({[\s\S]*})'
+                match = re.search(json_pattern, response_text)
+                if match:
+                    json_str = match.group(1)
+                else:
+                    json_str = response_text
+            
+            # Clean up the JSON string
+            json_str = json_str.strip()
+            
+            # Parse the JSON string
+            extracted_data = json.loads(json_str)
+            return extracted_data
         except Exception as e:
-            logger.error(f"Error generating content: {e}")
-            return f"Error generating content: {str(e)}"
+            return {"error": f"Extraction failed: {str(e)}"}
 
-    # Add the necessary methods expected by CrewAI
-    def function_calling_llm(self):
-        return self
-
-# Custom tools for CrewAI agents - with proper type annotations
-class InternetSearchTool(BaseTool):
-    name: str = "Internet Search"
-    description: str = "Search for information on the internet."
+# AGENT 2: Excel Feeder
+class ExcelFeederAgent:
+    def __init__(self):
+        self.model = initialize_text_model("gemini-pro")
+        self.name = "Excel Feeder"
     
-    def _run(self, query: str) -> str:
-        """Simulate searching the internet for information."""
-        # In a real implementation, this would use a search API
-        llm = GeminiLLM()
-        prompt = f"Search the internet for: {query}\nProvide a comprehensive summary of the results."
-        result = llm(prompt)
-        return result
-
-class DataAnalysisTool(BaseTool):
-    name: str = "Data Analysis"
-    description: str = "Analyze data and provide insights."
-    
-    def _run(self, data: str) -> str:
-        """Simulate data analysis."""
-        llm = GeminiLLM()
-        prompt = f"Analyze the following data and provide key insights:\n{data}"
-        result = llm(prompt)
-        return result
-
-class ContentCreationTool(BaseTool):
-    name: str = "Content Creation"
-    description: str = "Create high-quality content based on a topic."
-    
-    def _run(self, topic: str) -> str:
-        """Simulate content creation."""
-        llm = GeminiLLM()
-        prompt = f"Create high-quality content about: {topic}"
-        result = llm(prompt)
-        return result
-
-# Define the CrewAI agents
-def create_researcher_agent() -> Agent:
-    """Create a researcher agent."""
-    return Agent(
-        role="Research Specialist",
-        goal="Find accurate and detailed information on any given topic",
-        backstory="You are an expert researcher with years of experience in finding reliable information quickly.",
-        llm=GeminiLLM(),
-        tools=[InternetSearchTool()],
-        verbose=True,
-        allow_delegation=True,
-    )
-
-def create_analyst_agent() -> Agent:
-    """Create an analyst agent."""
-    return Agent(
-        role="Data Analyst",
-        goal="Analyze data and extract meaningful insights",
-        backstory="You are a data analyst with expertise in interpreting complex information and finding patterns.",
-        llm=GeminiLLM(),
-        tools=[DataAnalysisTool()],
-        verbose=True,
-        allow_delegation=True,
-    )
-
-def create_writer_agent() -> Agent:
-    """Create a content writer agent."""
-    return Agent(
-        role="Content Writer",
-        goal="Create engaging and informative content",
-        backstory="You are a skilled writer capable of creating compelling content on any topic.",
-        llm=GeminiLLM(),
-        tools=[ContentCreationTool()],
-        verbose=True,
-        allow_delegation=True,
-    )
-
-# Task types and their corresponding agent creators
-TASK_TYPES = {
-    "research": create_researcher_agent,
-    "analysis": create_analyst_agent,
-    "writing": create_writer_agent,
-}
-
-# Store active tasks and crews for each user
-user_tasks: Dict[int, Dict[str, Any]] = {}
-
-# Helper function to run synchronous tasks in a thread-safe way
-def run_sync_task(func, *args, **kwargs):
-    """Run a synchronous function in a thread-safe way."""
-    result = None
-    error = None
-    
-    def thread_target():
-        nonlocal result, error
+    def map_data_to_excel(self, extracted_data):
+        """Map the extracted data to Excel format."""
         try:
-            result = func(*args, **kwargs)
+            if "error" in extracted_data:
+                return {"error": extracted_data["error"]}
+            
+            # Create a DataFrame for the main invoice information
+            main_info = {
+                "Field": ["Invoice Number", "Date", "Vendor Name", "Subtotal", "Tax", "Total Amount"],
+                "Value": [
+                    extracted_data.get("invoice_number", ""),
+                    extracted_data.get("date", ""),
+                    extracted_data.get("vendor_name", ""),
+                    extracted_data.get("subtotal", ""),
+                    extracted_data.get("tax", ""),
+                    extracted_data.get("total", "")
+                ]
+            }
+            main_df = pd.DataFrame(main_info)
+            
+            # Create a DataFrame for line items
+            line_items = extracted_data.get("line_items", [])
+            if line_items:
+                items_df = pd.DataFrame(line_items)
+            else:
+                items_df = pd.DataFrame(columns=["description", "quantity", "unit_price", "total"])
+            
+            return {
+                "main_info": main_df,
+                "line_items": items_df
+            }
         except Exception as e:
-            error = e
+            return {"error": f"Excel mapping failed: {str(e)}"}
     
-    thread = threading.Thread(target=thread_target)
-    thread.start()
-    thread.join()
+    def create_excel_file(self, excel_data):
+        """Create an Excel file with the mapped data."""
+        try:
+            if "error" in excel_data:
+                return {"error": excel_data["error"]}
+            
+            # Create a new Excel workbook
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                # Write the main invoice information to the first sheet
+                excel_data["main_info"].to_excel(writer, sheet_name="Invoice Information", index=False)
+                
+                # Write the line items to the second sheet
+                excel_data["line_items"].to_excel(writer, sheet_name="Line Items", index=False)
+                
+                # Auto-adjust column widths
+                for sheet_name in writer.sheets:
+                    worksheet = writer.sheets[sheet_name]
+                    for i, col in enumerate(excel_data["main_info" if sheet_name == "Invoice Information" else "line_items"].columns):
+                        column_width = max(excel_data["main_info" if sheet_name == "Invoice Information" else "line_items"][col].astype(str).map(len).max(), len(col)) + 2
+                        worksheet.column_dimensions[openpyxl.utils.get_column_letter(i+1)].width = column_width
+            
+            output.seek(0)
+            return output
+        except Exception as e:
+            return {"error": f"Excel creation failed: {str(e)}"}
+
+# AGENT 3: Data Validator
+class DataValidatorAgent:
+    def __init__(self):
+        self.model = initialize_text_model("gemini-pro")
+        self.name = "Data Validator"
     
-    if error:
-        raise error
-    return result
-
-# Helper functions
-def ask_gemini_directly_sync(query: str, model_name: str = DEFAULT_MODEL) -> str:
-    """Ask Gemini directly without using CrewAI (synchronous version)."""
-    try:
-        model = genai.GenerativeModel(name=model_name)
-        response = model.generate_content(query)
-        return response.text
-    except Exception as e:
-        logger.error(f"Error generating content: {e}")
-        return f"Error generating content: {str(e)}"
-
-async def ask_gemini_directly(query: str, model_name: str = DEFAULT_MODEL) -> str:
-    """Ask Gemini directly without using CrewAI."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, ask_gemini_directly_sync, query, model_name)
-
-def create_and_run_crew_sync(user_id: int, task_type: str, task_description: str) -> str:
-    """Create and run a CrewAI crew for a specific task (synchronous version)."""
-    try:
-        # Create the primary agent based on task type
-        primary_agent = TASK_TYPES[task_type]()
+    def validate_data(self, extracted_data, excel_data):
+        """Validate the extracted data against the original invoice."""
+        if "error" in extracted_data or "error" in excel_data:
+            error_message = extracted_data.get("error", "") or excel_data.get("error", "")
+            return {"status": "error", "message": error_message, "incidents": [error_message]}
         
-        # Add additional agents based on task complexity
-        agents = [primary_agent]
-        if task_type == "research":
-            # For research tasks, also add writer agent to format the findings
-            agents.append(create_writer_agent())
-        elif task_type == "writing":
-            # For writing tasks, also add researcher for gathering facts
-            agents.append(create_researcher_agent())
+        system_prompt = """
+        You are a data validation expert. Analyze the extracted invoice data and identify any potential issues or inconsistencies.
         
-        # Create the task
-        task = Task(
-            description=task_description,
-            agent=primary_agent,
-            expected_output="A comprehensive response addressing all aspects of the task."
-        )
+        Check the following:
+        1. Are all required fields present? (Invoice Number, Date, Vendor Name, Line Items, Subtotal, Tax, Total Amount)
+        2. Are the numerical calculations correct? (Sum of line items should equal subtotal, subtotal + tax should equal total)
+        3. Are there any suspicious or unusual values?
         
-        # Create the crew
-        crew = Crew(
-            agents=agents,
-            tasks=[task],
-            verbose=True,
-            process=Process.sequential,  # Use sequential process for deterministic results
-        )
-        
-        # Store the crew and task info for the user
-        user_tasks[user_id] = {
-            "crew": crew,
-            "task_description": task_description,
-            "task_type": task_type,
-            "agents": agents,
-            "status": "running"
+        Return your analysis in JSON format with the following structure:
+        {
+            "status": "success" or "error",
+            "message": "Your overall assessment",
+            "incidents": [
+                "Description of issue 1",
+                "Description of issue 2"
+            ]
         }
         
-        # Run the crew
-        result = crew.kickoff()
+        If no issues are found, return:
+        {
+            "status": "success",
+            "message": "Invoice processed with no errors.",
+            "incidents": []
+        }
+        """
         
-        # Update task status
-        user_tasks[user_id]["status"] = "completed"
-        user_tasks[user_id]["result"] = result
-        
-        return result
-    except Exception as e:
-        logger.error(f"Error running crew: {e}")
-        return f"Error running crew: {str(e)}"
+        try:
+            # Convert the extracted data to a string for the model
+            data_str = json.dumps(extracted_data, indent=2)
+            
+            # Generate the validation
+            response = self.model.generate_content([
+                system_prompt,
+                f"Extracted invoice data to validate:\n{data_str}"
+            ])
+            
+            # Extract the JSON from the response
+            response_text = response.text
+            json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # If no code block, try to find JSON directly
+                json_pattern = r'({[\s\S]*})'
+                match = re.search(json_pattern, response_text)
+                if match:
+                    json_str = match.group(1)
+                else:
+                    json_str = response_text
+            
+            # Clean up and parse the JSON
+            validation_result = json.loads(json_str.strip())
+            return validation_result
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Validation failed: {str(e)}",
+                "incidents": [f"Validation failed: {str(e)}"]
+            }
 
-async def create_and_run_crew(user_id: int, task_type: str, task_description: str) -> str:
-    """Create and run a CrewAI crew for a specific task."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, create_and_run_crew_sync, user_id, task_type, task_description)
-
-# Telegram bot command handlers
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /start is issued."""
-    user = update.effective_user
-    welcome_message = (
-        f"👋 Hello {user.first_name}! I'm a CrewAI powered Telegram bot that can help you with various tasks.\n\n"
-        "I use multiple AI agents working together to tackle complex problems. Here's what I can do:\n"
-        "• 🔍 Research topics in depth\n"
-        "• 📊 Analyze data and provide insights\n"
-        "• ✍️ Create high-quality content\n\n"
-        "Use /help to see all available commands."
-    )
-    await update.message.reply_text(welcome_message)
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /help is issued."""
-    help_text = (
-        "🤖 *CrewAI Bot Commands* 🤖\n\n"
-        "/start - Start the bot\n"
-        "/help - Show this help message\n"
-        "/research [topic] - Research a topic in depth\n"
-        "/analyze [data] - Analyze data and provide insights\n"
-        "/write [topic] - Create content on a topic\n"
-        "/ask [question] - Ask a direct question (uses Gemini without CrewAI)\n"
-        "/status - Check the status of your current task\n"
-        "/cancel - Cancel your current task\n\n"
-        "You can also simply send me a message, and I'll determine the best agent team to handle it!"
-    )
-    await update.message.reply_text(help_text, parse_mode="Markdown")
-
-async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /research command."""
-    user_id = update.effective_user.id
-    
-    # Check if any arguments were provided
-    if not context.args:
-        await update.message.reply_text("Please specify a research topic. Example: /research artificial intelligence trends")
+# Function to process the invoice
+def process_invoice():
+    """Process the uploaded invoice using the three-agent system."""
+    if uploaded_file is None:
+        st.error("Please upload an invoice file.")
         return
     
-    # Get the research topic from arguments
-    topic = " ".join(context.args)
+    progress_placeholder = st.empty()
+    status_placeholder = st.empty()
     
-    # Inform the user that research is starting
-    await update.message.reply_text(f"🔍 Starting research on: '{topic}'\nThis may take a few minutes...")
-    
-    # Run the research task
     try:
-        result = await create_and_run_crew(user_id, "research", f"Research the following topic and provide a comprehensive summary: {topic}")
-    except Exception as e:
-        logger.error(f"Error in research command: {e}")
-        result = f"Sorry, an error occurred: {str(e)}"
-    
-    # Send the result
-    if not result:
-        result = "Sorry, I couldn't complete the research task. There might be an issue with the CrewAI system."
-    
-    # Send the result in chunks due to Telegram message size limitations
-    MAX_MESSAGE_LENGTH = 4096
-    if len(result) <= MAX_MESSAGE_LENGTH:
-        await update.message.reply_text(f"Research results on '{topic}':\n\n{result}")
-    else:
-        # Split the result into chunks
-        chunks = [result[i:i + MAX_MESSAGE_LENGTH] for i in range(0, len(result), MAX_MESSAGE_LENGTH)]
-        for i, chunk in enumerate(chunks):
-            await update.message.reply_text(
-                f"Research results on '{topic}' (Part {i+1}/{len(chunks)}):\n\n{chunk}"
-            )
-
-async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /analyze command."""
-    user_id = update.effective_user.id
-    
-    # Check if any arguments were provided
-    if not context.args:
-        await update.message.reply_text("Please provide data to analyze. Example: /analyze sales data for Q1 and Q2")
-        return
-    
-    # Get the data from arguments
-    data = " ".join(context.args)
-    
-    # Inform the user that analysis is starting
-    await update.message.reply_text(f"📊 Starting analysis of the provided data...\nThis may take a few minutes...")
-    
-    # Run the analysis task
-    try:
-        result = await create_and_run_crew(user_id, "analysis", f"Analyze the following data and provide insights: {data}")
-    except Exception as e:
-        logger.error(f"Error in analysis command: {e}")
-        result = f"Sorry, an error occurred: {str(e)}"
-    
-    # Send the result
-    if not result:
-        result = "Sorry, I couldn't complete the analysis task. There might be an issue with the CrewAI system."
-    
-    # Send the result in chunks due to Telegram message size limitations
-    MAX_MESSAGE_LENGTH = 4096
-    if len(result) <= MAX_MESSAGE_LENGTH:
-        await update.message.reply_text(f"Analysis results:\n\n{result}")
-    else:
-        # Split the result into chunks
-        chunks = [result[i:i + MAX_MESSAGE_LENGTH] for i in range(0, len(result), MAX_MESSAGE_LENGTH)]
-        for i, chunk in enumerate(chunks):
-            await update.message.reply_text(
-                f"Analysis results (Part {i+1}/{len(chunks)}):\n\n{chunk}"
-            )
-
-async def write_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /write command."""
-    user_id = update.effective_user.id
-    
-    # Check if any arguments were provided
-    if not context.args:
-        await update.message.reply_text("Please specify a writing topic. Example: /write benefits of exercise")
-        return
-    
-    # Get the topic from arguments
-    topic = " ".join(context.args)
-    
-    # Inform the user that content creation is starting
-    await update.message.reply_text(f"✍️ Starting to create content on: '{topic}'\nThis may take a few minutes...")
-    
-    # Run the writing task
-    try:
-        result = await create_and_run_crew(user_id, "writing", f"Create high-quality content about the following topic: {topic}")
-    except Exception as e:
-        logger.error(f"Error in write command: {e}")
-        result = f"Sorry, an error occurred: {str(e)}"
-    
-    # Send the result
-    if not result:
-        result = "Sorry, I couldn't complete the writing task. There might be an issue with the CrewAI system."
-    
-    # Send the result in chunks due to Telegram message size limitations
-    MAX_MESSAGE_LENGTH = 4096
-    if len(result) <= MAX_MESSAGE_LENGTH:
-        await update.message.reply_text(f"Content on '{topic}':\n\n{result}")
-    else:
-        # Split the result into chunks
-        chunks = [result[i:i + MAX_MESSAGE_LENGTH] for i in range(0, len(result), MAX_MESSAGE_LENGTH)]
-        for i, chunk in enumerate(chunks):
-            await update.message.reply_text(
-                f"Content on '{topic}' (Part {i+1}/{len(chunks)}):\n\n{chunk}"
-            )
-
-async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /ask command (direct to Gemini)."""
-    # Check if any arguments were provided
-    if not context.args:
-        await update.message.reply_text("Please ask a question. Example: /ask What is the capital of France?")
-        return
-    
-    # Get the question from arguments
-    question = " ".join(context.args)
-    
-    # Inform the user that the question is being processed
-    await update.message.reply_text("🤔 Processing your question...")
-    
-    # Ask Gemini directly
-    try:
-        result = await ask_gemini_directly(question)
-    except Exception as e:
-        logger.error(f"Error in ask command: {e}")
-        result = f"Sorry, an error occurred: {str(e)}"
-    
-    # Send the result
-    if not result:
-        result = "Sorry, I couldn't process your question. There might be an issue with the Gemini API."
-    
-    # Send the result in chunks due to Telegram message size limitations
-    MAX_MESSAGE_LENGTH = 4096
-    if len(result) <= MAX_MESSAGE_LENGTH:
-        await update.message.reply_text(f"Answer:\n\n{result}")
-    else:
-        # Split the result into chunks
-        chunks = [result[i:i + MAX_MESSAGE_LENGTH] for i in range(0, len(result), MAX_MESSAGE_LENGTH)]
-        for i, chunk in enumerate(chunks):
-            await update.message.reply_text(
-                f"Answer (Part {i+1}/{len(chunks)}):\n\n{chunk}"
-            )
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Check the status of the user's current task."""
-    user_id = update.effective_user.id
-    
-    if user_id not in user_tasks:
-        await update.message.reply_text("You don't have any active tasks.")
-        return
-    
-    task_info = user_tasks[user_id]
-    status = task_info.get("status", "unknown")
-    task_type = task_info.get("task_type", "unknown")
-    task_description = task_info.get("task_description", "unknown")
-    
-    status_message = (
-        f"*Task Status:* {status}\n"
-        f"*Task Type:* {task_type}\n"
-        f"*Description:* {task_description}\n"
-    )
-    
-    if status == "completed" and "result" in task_info:
-        result_summary = task_info['result'][:200] if task_info['result'] else "No result available."
-        status_message += f"\n*Result Summary:*\n{result_summary}...\n\n"
-        status_message += "Use /result to view the full result."
-    
-    await update.message.reply_text(status_message, parse_mode="Markdown")
-
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Cancel the user's current task."""
-    user_id = update.effective_user.id
-    
-    if user_id not in user_tasks:
-        await update.message.reply_text("You don't have any active tasks to cancel.")
-        return
-    
-    # Remove the user's task
-    del user_tasks[user_id]
-    await update.message.reply_text("✅ Your current task has been cancelled.")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle incoming messages and determine the appropriate action."""
-    user_id = update.effective_user.id
-    message_text = update.message.text
-    
-    # Create keyboard with task type options
-    keyboard = [
-        [
-            InlineKeyboardButton("Research", callback_data=f"task_research_{message_text}"),
-            InlineKeyboardButton("Analysis", callback_data=f"task_analysis_{message_text}"),
-            InlineKeyboardButton("Writing", callback_data=f"task_writing_{message_text}"),
-        ],
-        [
-            InlineKeyboardButton("Direct Question", callback_data=f"direct_{message_text}"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "How would you like me to process your request?",
-        reply_markup=reply_markup,
-    )
-
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle callback queries from inline keyboards."""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    callback_data = query.data
-    
-    if callback_data.startswith("task_"):
-        # Extract task type and message
-        parts = callback_data.split("_", 2)
-        if len(parts) < 3:
-            await query.edit_message_text("Invalid request format.")
+        # Display the uploaded file
+        if uploaded_file.type.startswith('image'):
+            image = Image.open(uploaded_file)
+            st.image(image, caption="Uploaded Invoice", use_column_width=True)
+            image_bytes = uploaded_file.getvalue()
+            image_type = uploaded_file.type
+        elif uploaded_file.type == 'application/pdf':
+            # Save the PDF temporarily and display using HTML iframe
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                tmp_file_path = tmp_file.name
+            
+            # Display PDF
+            with open(tmp_file_path, "rb") as f:
+                base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+            pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="500" type="application/pdf"></iframe>'
+            st.markdown(pdf_display, unsafe_allow_html=True)
+            
+            image_bytes = uploaded_file.getvalue()
+            image_type = uploaded_file.type
+            os.unlink(tmp_file_path)  # Clean up temp file
+        else:
+            st.error("Unsupported file type. Please upload an image or PDF.")
             return
         
-        task_type = parts[1]
-        message = parts[2]
+        # Agent 1: Invoice Reader
+        progress_placeholder.progress(0.33)
+        status_placeholder.info("Agent 1: Invoice Reader is extracting data...")
         
-        if task_type not in TASK_TYPES:
-            await query.edit_message_text(f"Unknown task type: {task_type}")
+        invoice_reader = InvoiceReaderAgent()
+        extracted_data = invoice_reader.extract_data(image_bytes, image_type)
+        st.session_state.extracted_data = extracted_data
+        
+        if "error" in extracted_data:
+            st.error(f"Error in Invoice Reader: {extracted_data['error']}")
             return
         
-        # Inform the user that the task is starting
-        await query.edit_message_text(f"Starting {task_type} task for: '{message}'\nThis may take a few minutes...")
+        # Display extracted data
+        st.markdown("<div class='agent-title'>Agent 1: Invoice Reader - Extracted Data</div>", unsafe_allow_html=True)
+        st.json(extracted_data)
         
-        # Run the task
-        try:
-            result = await create_and_run_crew(user_id, task_type, message)
-        except Exception as e:
-            logger.error(f"Error in handle_callback (task): {e}")
-            result = f"Sorry, an error occurred: {str(e)}"
+        # Agent 2: Excel Feeder
+        progress_placeholder.progress(0.66)
+        status_placeholder.info("Agent 2: Excel Feeder is mapping data to Excel...")
         
-        # Handle empty results
-        if not result:
-            result = "Sorry, I couldn't complete the task. There might be an issue with the CrewAI system."
+        excel_feeder = ExcelFeederAgent()
+        excel_data = excel_feeder.map_data_to_excel(extracted_data)
+        st.session_state.excel_data = excel_data
         
-        # Send the result in chunks due to Telegram message size limitations
-        MAX_MESSAGE_LENGTH = 4096
-        if len(result) <= MAX_MESSAGE_LENGTH:
-            await context.bot.send_message(chat_id=user_id, text=f"Results:\n\n{result}")
+        if "error" in excel_data:
+            st.error(f"Error in Excel Feeder: {excel_data['error']}")
+            return
+        
+        # Display mapped data
+        st.markdown("<div class='agent-title'>Agent 2: Excel Feeder - Excel Data</div>", unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Invoice Information**")
+            st.dataframe(excel_data["main_info"])
+        with col2:
+            st.markdown("**Line Items**")
+            st.dataframe(excel_data["line_items"])
+        
+        # Generate and offer Excel download
+        excel_file = excel_feeder.create_excel_file(excel_data)
+        if isinstance(excel_file, dict) and "error" in excel_file:
+            st.error(f"Error creating Excel file: {excel_file['error']}")
         else:
-            # Split the result into chunks
-            chunks = [result[i:i + MAX_MESSAGE_LENGTH] for i in range(0, len(result), MAX_MESSAGE_LENGTH)]
-            for i, chunk in enumerate(chunks):
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"Results (Part {i+1}/{len(chunks)}):\n\n{chunk}"
-                )
-    
-    elif callback_data.startswith("direct_"):
-        # Extract the question
-        question = callback_data[7:]  # Remove "direct_" prefix
+            st.download_button(
+                label="Download Excel File",
+                data=excel_file,
+                file_name="processed_invoice.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
         
-        # Inform the user that the question is being processed
-        await query.edit_message_text("Processing your question directly...")
+        # Agent 3: Data Validator
+        progress_placeholder.progress(1.0)
+        status_placeholder.info("Agent 3: Data Validator is verifying data...")
         
-        # Ask Gemini directly
-        try:
-            result = await ask_gemini_directly(question)
-        except Exception as e:
-            logger.error(f"Error in handle_callback (direct): {e}")
-            result = f"Sorry, an error occurred: {str(e)}"
+        data_validator = DataValidatorAgent()
+        validation_result = data_validator.validate_data(extracted_data, excel_data)
+        st.session_state.validation_result = validation_result
+        st.session_state.incidents = validation_result.get("incidents", [])
         
-        # Handle empty results
-        if not result:
-            result = "Sorry, I couldn't process your question. There might be an issue with the Gemini API."
+        # Display validation results
+        st.markdown("<div class='agent-title'>Agent 3: Data Validator - Validation Results</div>", unsafe_allow_html=True)
+        status_class = "success" if validation_result["status"] == "success" else "error"
+        st.markdown(f"<div class='status {status_class}'>{validation_result['message']}</div>", unsafe_allow_html=True)
         
-        # Send the result in chunks due to Telegram message size limitations
-        MAX_MESSAGE_LENGTH = 4096
-        if len(result) <= MAX_MESSAGE_LENGTH:
-            await context.bot.send_message(chat_id=user_id, text=f"Answer:\n\n{result}")
-        else:
-            # Split the result into chunks
-            chunks = [result[i:i + MAX_MESSAGE_LENGTH] for i in range(0, len(result), MAX_MESSAGE_LENGTH)]
-            for i, chunk in enumerate(chunks):
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"Answer (Part {i+1}/{len(chunks)}):\n\n{chunk}"
-                )
+        if validation_result["incidents"]:
+            st.markdown("**Incidents:**")
+            for incident in validation_result["incidents"]:
+                st.markdown(f"- {incident}")
+        
+        # Set processing complete flag
+        st.session_state.processing_complete = True
+        status_placeholder.success("Invoice processing complete!")
+        
+    except Exception as e:
+        st.error(f"An error occurred during processing: {str(e)}")
+        progress_placeholder.empty()
+        status_placeholder.empty()
 
-def main() -> None:
-    """Start the bot."""
-    # Create the Application
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+# Main application layout
+col1, col2 = st.columns([1, 3])
 
-    # Add command handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("research", research_command))
-    application.add_handler(CommandHandler("analyze", analyze_command))
-    application.add_handler(CommandHandler("write", write_command))
-    application.add_handler(CommandHandler("ask", ask_command))
-    application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("cancel", cancel_command))
+with col1:
+    st.markdown("<div class='agent-box'>", unsafe_allow_html=True)
+    st.markdown("### Upload Invoice")
+    uploaded_file = st.file_uploader("Choose an invoice file (image or PDF)", type=["jpg", "jpeg", "png", "pdf"])
     
-    # Add callback query handler
-    application.add_handler(CallbackQueryHandler(handle_callback))
+    if st.button("Process Invoice", disabled=uploaded_file is None):
+        process_invoice()
     
-    # Add message handler for general messages
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Start the Bot
-    application.run_polling()
-
-if __name__ == "__main__":
+    # Reset button to clear session state
+    if st.button("Reset"):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.experimental_rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
     
-    import asyncio
+    # Show system architecture
+    st.markdown("<div class='agent-box'>", unsafe_allow_html=True)
+    st.markdown("### System Architecture")
+    st.markdown("""
+    1. **Invoice Reader**:
+       - Extracts text and data from invoice
+       - Identifies key fields
+       - Structures data in JSON format
+       
+    2. **Excel Feeder**:
+       - Maps extracted data to Excel columns
+       - Creates structured spreadsheet
+       - Formats data appropriately
+       
+    3. **Data Validator**:
+       - Verifies data accuracy
+       - Checks calculations and consistency
+       - Reports any found issues
+    """)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+with col2:
+    # Display processing results if available
+    if st.session_state.processing_complete:
+        pass  # Results are displayed in the process_invoice function
+    else:
+        st.markdown("<div class='agent-box'>", unsafe_allow_html=True)
+        st.markdown("### Instructions")
+        st.markdown("""
+        1. Upload an invoice image or PDF using the file uploader on the left
+        2. Click the "Process Invoice" button to start the automated processing
+        3. The system will:
+           - Extract all relevant information from the invoice
+           - Map the data to Excel format
+           - Validate the data for accuracy
+        4. Review the results and download the Excel file
+        5. Check for any incidents reported by the Data Validator
+        """)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        # Sample invoice display
+        st.markdown("<div class='agent-box'>", unsafe_allow_html=True)
+        st.markdown("### Sample Invoice Format")
+        sample_invoice = """
+        INVOICE #INV-123456
+        Date: 2025-01-15
+        
+        Vendor: ABC Company Inc.
+        
+        Item        Qty   Unit Price   Total
+        ----------------------------------
+        Widget A    5     $10.00       $50.00
+        Service B   2     $75.00       $150.00
+        Part C      10    $5.50        $55.00
+        
+        Subtotal:               $255.00
+        Tax (8%):               $20.40
+        Total:                  $275.40
+        """
+        st.code(sample_invoice)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    # Add all handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("research", research_command))
-    application.add_handler(CommandHandler("analyze", analyze_command))
-    application.add_handler(CommandHandler("write", write_command))
-    application.add_handler(CommandHandler("ask", ask_command))
-    application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("cancel", cancel_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(handle_callback))
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    loop.run_until_complete(application.run_polling())
-    
+# Footer
+st.markdown("---")
+st.markdown("© 2025 Automated Invoice Processing System | Built with Streamlit and Google Gemini")
