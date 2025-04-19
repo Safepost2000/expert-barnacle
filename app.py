@@ -438,7 +438,7 @@ with col1:
     if st.button("Reset"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
-        st.experimental_rerun()
+        st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
     
     # Show system architecture
