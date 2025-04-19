@@ -1,0 +1,5 @@
+streamlit
+python-telegram-bot 
+crewai 
+google-generativeai 
+python-dotenv
