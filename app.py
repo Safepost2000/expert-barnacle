@@ -88,12 +88,12 @@ if 'processing_complete' not in st.session_state:
     st.session_state.processing_complete = False
 
 # Initialize Gemini models
-def initialize_model(model_name="gemini-pro-vision"):
+def initialize_model(model_name="gemini-2.5-pro-preview-03-25):
     """Initialize and return the specified Gemini model."""
     model = genai.GenerativeModel(model_name)
     return model
 
-def initialize_text_model(model_name="gemini-pro"):
+def initialize_text_model(model_name="gemini-2.0-flash"):
     """Initialize and return the text-only Gemini model."""
     model = genai.GenerativeModel(model_name)
     return model
@@ -101,7 +101,7 @@ def initialize_text_model(model_name="gemini-pro"):
 # AGENT 1: Invoice Reader
 class InvoiceReaderAgent:
     def __init__(self):
-        self.model = initialize_model("gemini-pro-vision")
+        self.model = initialize_model("gemini-2.5-pro-preview-03-25")
         self.name = "Invoice Reader"
     
     def extract_data(self, image_bytes, image_type):
@@ -173,7 +173,7 @@ class InvoiceReaderAgent:
 # AGENT 2: Excel Feeder
 class ExcelFeederAgent:
     def __init__(self):
-        self.model = initialize_text_model("gemini-pro")
+        self.model = initialize_text_model("gemini-2.0-flash")
         self.name = "Excel Feeder"
     
     def map_data_to_excel(self, extracted_data):
@@ -240,7 +240,7 @@ class ExcelFeederAgent:
 # AGENT 3: Data Validator
 class DataValidatorAgent:
     def __init__(self):
-        self.model = initialize_text_model("gemini-pro")
+        self.model = initialize_text_model("gemini-2.0-flash")
         self.name = "Data Validator"
     
     def validate_data(self, extracted_data, excel_data):
@@ -323,7 +323,7 @@ def process_invoice():
         # Display the uploaded file
         if uploaded_file.type.startswith('image'):
             image = Image.open(uploaded_file)
-            st.image(image, caption="Uploaded Invoice", use_column_width=True)
+            st.image(image, caption="Uploaded Invoice", use_container_width=True)
             image_bytes = uploaded_file.getvalue()
             image_type = uploaded_file.type
         elif uploaded_file.type == 'application/pdf':
