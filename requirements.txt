@@ -4,4 +4,6 @@ crewai
 google-generativeai 
 python-dotenv
 pysqlite3-binary
-asyncio
+pandas
+Pillow
+openpyxl
