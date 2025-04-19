@@ -124,7 +124,7 @@ def initialize_vision_model(model_name="gemini-pro-vision"):
     model = genai.GenerativeModel(model_name)
     return model
 
-def initialize_text_model(model_name="gemini-pro"):
+def initialize_text_model(model_name="gemini-2.0-flash"):
     """Initialize and return the text-only Gemini model."""
     model = genai.GenerativeModel(model_name)
     return model
@@ -132,7 +132,7 @@ def initialize_text_model(model_name="gemini-pro"):
 # AGENT 1: Invoice Reader
 class InvoiceReaderAgent:
     def __init__(self):
-        self.model = initialize_vision_model("gemini-pro-vision")
+        self.model = initialize_vision_model("gemini-2.0-flash")
         self.name = "Invoice Reader"
     
     def extract_data(self, image_bytes, image_type, file_name=""):
@@ -223,7 +223,7 @@ class InvoiceReaderAgent:
             extracted_data["_metadata"] = {
                 "extraction_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "file_name": file_name,
-                "model": "gemini-pro-vision"
+                "model": "gemini-2.0-flash"
             }
             
             return extracted_data
@@ -233,7 +233,7 @@ class InvoiceReaderAgent:
 # AGENT 2: Excel Feeder
 class ExcelFeederAgent:
     def __init__(self):
-        self.model = initialize_text_model("gemini-pro")
+        self.model = initialize_text_model("gemini-2.0-flash")
         self.name = "Excel Feeder"
     
     def map_data_to_excel(self, extracted_data):
@@ -398,7 +398,7 @@ class ExcelFeederAgent:
 # AGENT 3: Data Validator
 class DataValidatorAgent:
     def __init__(self):
-        self.model = initialize_text_model("gemini-pro")
+        self.model = initialize_text_model("gemini-2.0-flash")
         self.name = "Data Validator"
     
     def validate_data(self, extracted_data, excel_data):
