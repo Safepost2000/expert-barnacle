@@ -88,7 +88,7 @@ if 'processing_complete' not in st.session_state:
     st.session_state.processing_complete = False
 
 # Initialize Gemini models
-def initialize_model(model_name="gemini-2.0-flash):
+def initialize_model(model_name="gemini-2.0-flash"):
     """Initialize and return the specified Gemini model."""
     model = genai.GenerativeModel(model_name)
     return model
