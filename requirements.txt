@@ -4,5 +4,3 @@ crewai
 google-generativeai 
 python-dotenv
 pysqlite3-binary
-pysqlite3
-sqlite3
