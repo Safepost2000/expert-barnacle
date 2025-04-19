@@ -1,10 +1,12 @@
 __import__('pysqlite3')
 import sys
 sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
 import os
 import asyncio
 import logging
-from typing import Dict, List, Optional, Tuple, Union, Any
+import threading
+from typing import Dict, List, Optional, Tuple, Union, Any, Callable
 from dotenv import load_dotenv
 import json
 
@@ -43,65 +45,61 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
 
 # Available Gemini models
-GEMINI_MODELS = {
-    "gemini-pro": "models/gemini-pro",
-    "gemini-pro-vision": "models/gemini-pro-vision",
-    "gemini-ultra": "models/gemini-ultra",
-}
-
-# Default Gemini model to use
 DEFAULT_MODEL = "gemini-pro"
 
 # Custom class for wrapping Gemini with LLM interface compatible with CrewAI
 class GeminiLLM:
     def __init__(self, model_name: str = DEFAULT_MODEL):
         self.model_name = model_name
-        self.model = genai.GenerativeModel(model_name=GEMINI_MODELS.get(model_name, GEMINI_MODELS[DEFAULT_MODEL]))
+        self.model = genai.GenerativeModel(name=model_name)
+        self.supports_functions = True
+        self.supports_stop_words = False
     
-    async def generate_content(self, prompt: str, **kwargs):
-        """Generate content using Gemini API."""
+    def __call__(self, prompt: str, **kwargs):
         try:
-            response = await asyncio.to_thread(
-                self.model.generate_content, prompt, **kwargs
-            )
+            response = self.model.generate_content(prompt)
             return response.text
         except Exception as e:
             logger.error(f"Error generating content: {e}")
             return f"Error generating content: {str(e)}"
+
+    # Add the necessary methods expected by CrewAI
+    def function_calling_llm(self):
+        return self
 
 # Custom tools for CrewAI agents - with proper type annotations
 class InternetSearchTool(BaseTool):
     name: str = "Internet Search"
     description: str = "Search for information on the internet."
     
-    async def _run(self, query: str) -> str:
+    def _run(self, query: str) -> str:
         """Simulate searching the internet for information."""
         # In a real implementation, this would use a search API
         llm = GeminiLLM()
         prompt = f"Search the internet for: {query}\nProvide a comprehensive summary of the results."
-        result = await llm.generate_content(prompt)
+        result = llm(prompt)
         return result
 
 class DataAnalysisTool(BaseTool):
     name: str = "Data Analysis"
     description: str = "Analyze data and provide insights."
     
-    async def _run(self, data: str) -> str:
+    def _run(self, data: str) -> str:
         """Simulate data analysis."""
         llm = GeminiLLM()
         prompt = f"Analyze the following data and provide key insights:\n{data}"
-        result = await llm.generate_content(prompt)
+        result = llm(prompt)
         return result
 
 class ContentCreationTool(BaseTool):
     name: str = "Content Creation"
     description: str = "Create high-quality content based on a topic."
     
-    async def _run(self, topic: str) -> str:
+    def _run(self, topic: str) -> str:
         """Simulate content creation."""
         llm = GeminiLLM()
         prompt = f"Create high-quality content about: {topic}"
-        result = await llm.generate_content(prompt)
+        result = llm(prompt)
         return result
 
 # Define the CrewAI agents
@@ -151,15 +149,45 @@ TASK_TYPES = {
 # Store active tasks and crews for each user
 user_tasks: Dict[int, Dict[str, Any]] = {}
 
+# Helper function to run synchronous tasks in a thread-safe way
+def run_sync_task(func, *args, **kwargs):
+    """Run a synchronous function in a thread-safe way."""
+    result = None
+    error = None
+    
+    def thread_target():
+        nonlocal result, error
+        try:
+            result = func(*args, **kwargs)
+        except Exception as e:
+            error = e
+    
+    thread = threading.Thread(target=thread_target)
+    thread.start()
+    thread.join()
+    
+    if error:
+        raise error
+    return result
+
 # Helper functions
+def ask_gemini_directly_sync(query: str, model_name: str = DEFAULT_MODEL) -> str:
+    """Ask Gemini directly without using CrewAI (synchronous version)."""
+    try:
+        model = genai.GenerativeModel(name=model_name)
+        response = model.generate_content(query)
+        return response.text
+    except Exception as e:
+        logger.error(f"Error generating content: {e}")
+        return f"Error generating content: {str(e)}"
+
 async def ask_gemini_directly(query: str, model_name: str = DEFAULT_MODEL) -> str:
     """Ask Gemini directly without using CrewAI."""
-    llm = GeminiLLM(model_name)
-    response = await llm.generate_content(query)
-    return response
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, ask_gemini_directly_sync, query, model_name)
 
-async def create_and_run_crew(user_id: int, task_type: str, task_description: str) -> str:
-    """Create and run a CrewAI crew for a specific task."""
+def create_and_run_crew_sync(user_id: int, task_type: str, task_description: str) -> str:
+    """Create and run a CrewAI crew for a specific task (synchronous version)."""
     try:
         # Create the primary agent based on task type
         primary_agent = TASK_TYPES[task_type]()
@@ -198,7 +226,7 @@ async def create_and_run_crew(user_id: int, task_type: str, task_description: st
         }
         
         # Run the crew
-        result = await asyncio.to_thread(crew.kickoff)
+        result = crew.kickoff()
         
         # Update task status
         user_tasks[user_id]["status"] = "completed"
@@ -208,6 +236,11 @@ async def create_and_run_crew(user_id: int, task_type: str, task_description: st
     except Exception as e:
         logger.error(f"Error running crew: {e}")
         return f"Error running crew: {str(e)}"
+
+async def create_and_run_crew(user_id: int, task_type: str, task_description: str) -> str:
+    """Create and run a CrewAI crew for a specific task."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, create_and_run_crew_sync, user_id, task_type, task_description)
 
 # Telegram bot command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -255,10 +288,27 @@ async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text(f"🔍 Starting research on: '{topic}'\nThis may take a few minutes...")
     
     # Run the research task
-    result = await create_and_run_crew(user_id, "research", f"Research the following topic and provide a comprehensive summary: {topic}")
+    try:
+        result = await create_and_run_crew(user_id, "research", f"Research the following topic and provide a comprehensive summary: {topic}")
+    except Exception as e:
+        logger.error(f"Error in research command: {e}")
+        result = f"Sorry, an error occurred: {str(e)}"
     
     # Send the result
-    await update.message.reply_text(f"Research results on '{topic}':\n\n{result}")
+    if not result:
+        result = "Sorry, I couldn't complete the research task. There might be an issue with the CrewAI system."
+    
+    # Send the result in chunks due to Telegram message size limitations
+    MAX_MESSAGE_LENGTH = 4096
+    if len(result) <= MAX_MESSAGE_LENGTH:
+        await update.message.reply_text(f"Research results on '{topic}':\n\n{result}")
+    else:
+        # Split the result into chunks
+        chunks = [result[i:i + MAX_MESSAGE_LENGTH] for i in range(0, len(result), MAX_MESSAGE_LENGTH)]
+        for i, chunk in enumerate(chunks):
+            await update.message.reply_text(
+                f"Research results on '{topic}' (Part {i+1}/{len(chunks)}):\n\n{chunk}"
+            )
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /analyze command."""
@@ -276,10 +326,27 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(f"📊 Starting analysis of the provided data...\nThis may take a few minutes...")
     
     # Run the analysis task
-    result = await create_and_run_crew(user_id, "analysis", f"Analyze the following data and provide insights: {data}")
+    try:
+        result = await create_and_run_crew(user_id, "analysis", f"Analyze the following data and provide insights: {data}")
+    except Exception as e:
+        logger.error(f"Error in analysis command: {e}")
+        result = f"Sorry, an error occurred: {str(e)}"
     
     # Send the result
-    await update.message.reply_text(f"Analysis results:\n\n{result}")
+    if not result:
+        result = "Sorry, I couldn't complete the analysis task. There might be an issue with the CrewAI system."
+    
+    # Send the result in chunks due to Telegram message size limitations
+    MAX_MESSAGE_LENGTH = 4096
+    if len(result) <= MAX_MESSAGE_LENGTH:
+        await update.message.reply_text(f"Analysis results:\n\n{result}")
+    else:
+        # Split the result into chunks
+        chunks = [result[i:i + MAX_MESSAGE_LENGTH] for i in range(0, len(result), MAX_MESSAGE_LENGTH)]
+        for i, chunk in enumerate(chunks):
+            await update.message.reply_text(
+                f"Analysis results (Part {i+1}/{len(chunks)}):\n\n{chunk}"
+            )
 
 async def write_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /write command."""
@@ -297,10 +364,27 @@ async def write_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(f"✍️ Starting to create content on: '{topic}'\nThis may take a few minutes...")
     
     # Run the writing task
-    result = await create_and_run_crew(user_id, "writing", f"Create high-quality content about the following topic: {topic}")
+    try:
+        result = await create_and_run_crew(user_id, "writing", f"Create high-quality content about the following topic: {topic}")
+    except Exception as e:
+        logger.error(f"Error in write command: {e}")
+        result = f"Sorry, an error occurred: {str(e)}"
     
     # Send the result
-    await update.message.reply_text(f"Content on '{topic}':\n\n{result}")
+    if not result:
+        result = "Sorry, I couldn't complete the writing task. There might be an issue with the CrewAI system."
+    
+    # Send the result in chunks due to Telegram message size limitations
+    MAX_MESSAGE_LENGTH = 4096
+    if len(result) <= MAX_MESSAGE_LENGTH:
+        await update.message.reply_text(f"Content on '{topic}':\n\n{result}")
+    else:
+        # Split the result into chunks
+        chunks = [result[i:i + MAX_MESSAGE_LENGTH] for i in range(0, len(result), MAX_MESSAGE_LENGTH)]
+        for i, chunk in enumerate(chunks):
+            await update.message.reply_text(
+                f"Content on '{topic}' (Part {i+1}/{len(chunks)}):\n\n{chunk}"
+            )
 
 async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /ask command (direct to Gemini)."""
@@ -316,10 +400,27 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text("🤔 Processing your question...")
     
     # Ask Gemini directly
-    result = await ask_gemini_directly(question)
+    try:
+        result = await ask_gemini_directly(question)
+    except Exception as e:
+        logger.error(f"Error in ask command: {e}")
+        result = f"Sorry, an error occurred: {str(e)}"
     
     # Send the result
-    await update.message.reply_text(f"Answer:\n\n{result}")
+    if not result:
+        result = "Sorry, I couldn't process your question. There might be an issue with the Gemini API."
+    
+    # Send the result in chunks due to Telegram message size limitations
+    MAX_MESSAGE_LENGTH = 4096
+    if len(result) <= MAX_MESSAGE_LENGTH:
+        await update.message.reply_text(f"Answer:\n\n{result}")
+    else:
+        # Split the result into chunks
+        chunks = [result[i:i + MAX_MESSAGE_LENGTH] for i in range(0, len(result), MAX_MESSAGE_LENGTH)]
+        for i, chunk in enumerate(chunks):
+            await update.message.reply_text(
+                f"Answer (Part {i+1}/{len(chunks)}):\n\n{chunk}"
+            )
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check the status of the user's current task."""
@@ -341,7 +442,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
     
     if status == "completed" and "result" in task_info:
-        status_message += f"\n*Result Summary:*\n{task_info['result'][:200]}...\n\n"
+        result_summary = task_info['result'][:200] if task_info['result'] else "No result available."
+        status_message += f"\n*Result Summary:*\n{result_summary}...\n\n"
         status_message += "Use /result to view the full result."
     
     await update.message.reply_text(status_message, parse_mode="Markdown")
@@ -407,7 +509,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text(f"Starting {task_type} task for: '{message}'\nThis may take a few minutes...")
         
         # Run the task
-        result = await create_and_run_crew(user_id, task_type, message)
+        try:
+            result = await create_and_run_crew(user_id, task_type, message)
+        except Exception as e:
+            logger.error(f"Error in handle_callback (task): {e}")
+            result = f"Sorry, an error occurred: {str(e)}"
+        
+        # Handle empty results
+        if not result:
+            result = "Sorry, I couldn't complete the task. There might be an issue with the CrewAI system."
         
         # Send the result in chunks due to Telegram message size limitations
         MAX_MESSAGE_LENGTH = 4096
@@ -430,9 +540,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("Processing your question directly...")
         
         # Ask Gemini directly
-        result = await ask_gemini_directly(question)
+        try:
+            result = await ask_gemini_directly(question)
+        except Exception as e:
+            logger.error(f"Error in handle_callback (direct): {e}")
+            result = f"Sorry, an error occurred: {str(e)}"
         
-        # Send the result
+        # Handle empty results
+        if not result:
+            result = "Sorry, I couldn't process your question. There might be an issue with the Gemini API."
+        
+        # Send the result in chunks due to Telegram message size limitations
         MAX_MESSAGE_LENGTH = 4096
         if len(result) <= MAX_MESSAGE_LENGTH:
             await context.bot.send_message(chat_id=user_id, text=f"Answer:\n\n{result}")
