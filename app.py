@@ -588,4 +588,28 @@ def main() -> None:
     application.run_polling()
 
 if __name__ == "__main__":
-    main()
+    
+    import asyncio
+
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # Add all handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("research", research_command))
+    application.add_handler(CommandHandler("analyze", analyze_command))
+    application.add_handler(CommandHandler("write", write_command))
+    application.add_handler(CommandHandler("ask", ask_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(handle_callback))
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    loop.run_until_complete(application.run_polling())
+    
